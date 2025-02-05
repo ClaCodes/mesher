@@ -22,27 +22,78 @@ func watchdog(addr net.UDPAddr, timed_out chan net.UDPAddr) chan struct{} {
     return channel
 }
 
-func feeder(channel chan net.UDPAddr) {
+func server(channel chan Msg, conn *net.UDPConn) {
     timed_out := make(chan net.UDPAddr)
     clients := make(map[string]chan struct{})
+    clients_tx := make(map[string]chan []byte)
+    ticker := time.NewTicker(5 * time.Second)
     go func(){
         for {
             select {
-            case a := <- channel:
-                c, ok := clients[a.String()]
-                if ok {
-                    log.Println("Feeding ", a)
-                } else {
-                    log.Println("New Feeding ", a)
-                    c = watchdog(a, timed_out)
-                    clients[a.String()]=c
+            case <- ticker.C:
+                buf := make([]byte, 0)
+                for k, _ := range clients {
+                    buf = append(buf, k...)
+                    buf = append(buf, ' ')
                 }
+                for _, c := range clients_tx {
+                    c <- buf
+                }
+            case msg := <- channel:
+                tx, ok := clients_tx[msg.addr.String()]
+                if !ok {
+                    tx = writer(msg.addr, conn)
+                    clients_tx[msg.addr.String()]=tx
+                }
+                c, ok := clients[msg.addr.String()]
+                if !ok {
+                    c = watchdog(msg.addr, timed_out)
+                    clients[msg.addr.String()]=c
+                }
+                tx <- msg.buf
                 c <- struct{}{}
             case a := <- timed_out:
+                // todo delete client
                 log.Println("Timed out ", a)
             }
         }
     }()
+}
+
+func writer(addr net.UDPAddr, conn *net.UDPConn) chan []byte{
+    // todo goroutine is leaking if channel is not closed
+    tx := make(chan []byte)
+    go func() {
+        for b := range tx {
+            conn.WriteToUDP(b, &addr)
+        }
+        log.Println("Writer finishing for ", addr)
+    }()
+    return tx
+}
+
+type Msg struct {
+    addr net.UDPAddr
+    buf []byte
+}
+
+func reader(conn *net.UDPConn) chan Msg {
+    rx := make(chan Msg)
+    go func() {
+        for {
+            buf := make([]byte, 65536)
+            n, addr, err := conn.ReadFromUDP(buf)
+            if err != nil {
+                log.Println("Reader Error: ", err)
+                // todo really unrecoverable?
+                break;
+            }
+            log.Println("Received ", string(buf[0:n]), " from ", addr)
+            rx <- Msg{*addr, buf[0:n]}
+        }
+        log.Println("Reader Ending")
+    }()
+    return rx
 }
 
 func main() {
@@ -55,20 +106,9 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-    buf := make([]byte, 65536)
-    c := make(chan net.UDPAddr)
-    feeder(c)
+    rx := reader(conn)
+    server(rx, conn)
 
-    for {
-        n, addr, err := conn.ReadFromUDP(buf)
-        if err != nil {
-            log.Println("Error: ", err)
-            continue
-        }
-        log.Println("Received ", string(buf[0:n]), " from ", addr)
-        c<-*addr
-        // rx <- buf[0:n]
-        conn.WriteToUDP(buf[0:n], addr)
-    }
+    for { }
     conn.Close()
 }
