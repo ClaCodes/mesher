@@ -2,9 +2,10 @@ package main
 
 import (
     "log"
-    // "mesher/msg"
+    "mesher/msg"
     "net"
     "time"
+    "encoding/binary"
 )
 
 func watchdog(addr net.UDPAddr, timed_out chan net.UDPAddr) chan struct{} {
@@ -22,7 +23,7 @@ func watchdog(addr net.UDPAddr, timed_out chan net.UDPAddr) chan struct{} {
     return channel
 }
 
-func server(channel chan Msg, conn *net.UDPConn) {
+func server(rx chan net.UDPAddr, conn *net.UDPConn) {
     timed_out := make(chan net.UDPAddr)
     clients := make(map[string]chan struct{})
     clients_tx := make(map[string]chan []byte)
@@ -39,18 +40,17 @@ func server(channel chan Msg, conn *net.UDPConn) {
                 for _, c := range clients_tx {
                     c <- buf
                 }
-            case msg := <- channel:
-                tx, ok := clients_tx[msg.addr.String()]
+            case addr := <- rx:
+                tx, ok := clients_tx[addr.String()]
                 if !ok {
-                    tx = writer(msg.addr, conn)
-                    clients_tx[msg.addr.String()]=tx
+                    tx = writer(addr, conn)
+                    clients_tx[addr.String()]=tx
                 }
-                c, ok := clients[msg.addr.String()]
+                c, ok := clients[addr.String()]
                 if !ok {
-                    c = watchdog(msg.addr, timed_out)
-                    clients[msg.addr.String()]=c
+                    c = watchdog(addr, timed_out)
+                    clients[addr.String()]=c
                 }
-                tx <- msg.buf
                 c <- struct{}{}
             case a := <- timed_out:
                 // todo delete client
@@ -72,13 +72,8 @@ func writer(addr net.UDPAddr, conn *net.UDPConn) chan []byte{
     return tx
 }
 
-type Msg struct {
-    addr net.UDPAddr
-    buf []byte
-}
-
-func reader(conn *net.UDPConn) chan Msg {
-    rx := make(chan Msg)
+func reader(conn *net.UDPConn) chan net.UDPAddr {
+    rx := make(chan net.UDPAddr)
     go func() {
         for {
             buf := make([]byte, 65536)
@@ -88,8 +83,12 @@ func reader(conn *net.UDPConn) chan Msg {
                 // todo really unrecoverable?
                 break;
             }
-            log.Println("Received ", string(buf[0:n]), " from ", addr)
-            rx <- Msg{*addr, buf[0:n]}
+            msg_type := binary.BigEndian.Uint32(buf[:n])
+            switch msg_type {
+            case msg.Client_hello:
+                log.Println("Received Client_hello from ", addr)
+                rx <- *addr
+            }
         }
         log.Println("Reader Ending")
     }()

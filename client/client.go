@@ -2,11 +2,25 @@ package main
 
 import (
     "log"
-    // "mesher/msg"
+    "encoding/binary"
+    "mesher/msg"
     "net"
-    "strconv"
     "time"
 )
+
+func reader(conn *net.UDPConn) {
+    go func() {
+        for {
+            rxbuf := make([]byte, 65536)
+            n, addr, err := conn.ReadFromUDP(rxbuf)
+            if err != nil {
+                break;
+            }
+            log.Println("Received ", string(rxbuf[0:n]), " from ", addr)
+        }
+        log.Println("reader ending")
+    }()
+}
 
 func main() {
 
@@ -25,19 +39,16 @@ func main() {
         log.Fatal(err)
     }
 
-    i := 0
+    reader(conn)
+
     for {
-        msg := strconv.Itoa(i)
-        i++
-        txbuf := []byte(msg)
-        _, err := conn.Write(txbuf)
+        var txbuf [4]byte
+        binary.BigEndian.PutUint32(txbuf[:], msg.Client_hello)
+        _, err := conn.Write(txbuf[:])
         if err != nil {
-            log.Println(msg, err)
+            log.Println(txbuf, err)
         }
         time.Sleep(time.Second * 1)
-        rxbuf := make([]byte, 65536)
-        n, addr, err := conn.ReadFromUDP(rxbuf)
-        log.Println("Received ", string(rxbuf[0:n]), " from ", addr)
     }
 
     conn.Close()
