@@ -5,7 +5,6 @@ import (
     "mesher/msg"
     "net"
     "time"
-    "encoding/binary"
 )
 
 func watchdog(addr net.UDPAddr, timed_out chan net.UDPAddr) chan struct{} {
@@ -23,38 +22,52 @@ func watchdog(addr net.UDPAddr, timed_out chan net.UDPAddr) chan struct{} {
     return channel
 }
 
-func server(rx chan net.UDPAddr, conn *net.UDPConn) {
+type client struct {
+    watchdog chan struct{}
+    tx chan []byte
+}
+
+func server(hello_channel chan net.UDPAddr, relay_channel chan []byte, conn *net.UDPConn) {
     timed_out := make(chan net.UDPAddr)
-    clients := make(map[string]chan struct{})
-    clients_tx := make(map[string]chan []byte)
-    ticker := time.NewTicker(5 * time.Second)
+    clients := make(map[msg.Mesher_addres] client)
+    ticker := time.NewTicker(1 * time.Second)
     go func(){
         for {
             select {
             case <- ticker.C:
                 buf := make([]byte, 0)
+                buf = append(buf, msg.SERVER_HELLO)
                 for k, _ := range clients {
-                    buf = append(buf, k...)
-                    buf = append(buf, ' ')
+                    buf = append(buf, k[:]...)
                 }
-                for _, c := range clients_tx {
-                    c <- buf
+                for addr, c := range clients {
+                    log.Println("Sent     SERVER_HELLO to  ", msg.To_udp_addr(addr[:]), ":", buf[1:])
+                    c.tx <- buf
                 }
-            case addr := <- rx:
-                tx, ok := clients_tx[addr.String()]
+            case addr := <- hello_channel:
+                var m msg.Mesher_addres
+                msg.From_addr(m[:], addr)
+                c, ok := clients[m]
                 if !ok {
-                    tx = writer(addr, conn)
-                    clients_tx[addr.String()]=tx
+                    c = client{
+                        watchdog(addr, timed_out),
+                        writer(addr, conn),
+                    }
+                    clients[m] = c
                 }
-                c, ok := clients[addr.String()]
-                if !ok {
-                    c = watchdog(addr, timed_out)
-                    clients[addr.String()]=c
-                }
-                c <- struct{}{}
+                c.watchdog <- struct{}{}
             case a := <- timed_out:
+                var m msg.Mesher_addres
+                msg.From_addr(m[:], a)
+                delete(clients, m)
                 // todo delete client
                 log.Println("Timed out ", a)
+            case b := <- relay_channel:
+                // todo delete client
+                if len(b) >= 18 {
+                    dest := msg.To_udp_addr(b[:18])
+                    log.Println("Relaying to ", dest, " ", b[18:])
+                }
             }
         }
     }()
@@ -72,8 +85,9 @@ func writer(addr net.UDPAddr, conn *net.UDPConn) chan []byte{
     return tx
 }
 
-func reader(conn *net.UDPConn) chan net.UDPAddr {
-    rx := make(chan net.UDPAddr)
+func reader(conn *net.UDPConn) (chan net.UDPAddr, chan []byte) {
+    hello_channel := make(chan net.UDPAddr)
+    relay_channel := make(chan []byte)
     go func() {
         for {
             buf := make([]byte, 65536)
@@ -83,16 +97,19 @@ func reader(conn *net.UDPConn) chan net.UDPAddr {
                 // todo really unrecoverable?
                 break;
             }
-            msg_type := binary.BigEndian.Uint32(buf[:n])
+            msg_type := buf[0]
             switch msg_type {
-            case msg.Client_hello:
-                log.Println("Received Client_hello from ", addr)
-                rx <- *addr
+            case msg.CLIENT_HELLO:
+                log.Println("Received CLIENT_HELLO from", addr)
+                hello_channel <- *addr
+            case msg.CLIENT_RELAY_TO:
+                log.Println("Received CLIENT_RELAY_TO from", addr)
+                relay_channel <- buf[1:n]
             }
         }
         log.Println("Reader Ending")
     }()
-    return rx
+    return hello_channel, relay_channel
 }
 
 func main() {
@@ -105,8 +122,8 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-    rx := reader(conn)
-    server(rx, conn)
+    hello_channel, relay_channel := reader(conn)
+    server(hello_channel, relay_channel, conn)
 
     for { }
     conn.Close()
