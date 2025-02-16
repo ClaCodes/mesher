@@ -13,7 +13,7 @@ func watchdog(addr net.UDPAddr, timed_out chan net.UDPAddr) chan struct{} {
         for {
             select {
             case <- channel:
-            case <-time.After(5*time.Second):
+            case <- time.After(5*time.Second):
                 timed_out <- addr
                 return
             }
@@ -27,7 +27,7 @@ type client struct {
     tx chan []byte
 }
 
-func server(hello_channel chan net.UDPAddr, relay_channel chan []byte, conn *net.UDPConn) {
+func server(client_msg_channel chan msg.Mesher_msg, conn *net.UDPConn) {
     timed_out := make(chan net.UDPAddr)
     clients := make(map[msg.Mesher_addres] client)
     ticker := time.NewTicker(1 * time.Second)
@@ -35,81 +35,64 @@ func server(hello_channel chan net.UDPAddr, relay_channel chan []byte, conn *net
         for {
             select {
             case <- ticker.C:
-                buf := make([]byte, 0)
-                buf = append(buf, msg.SERVER_HELLO)
-                for k, _ := range clients {
-                    buf = append(buf, k[:]...)
-                }
                 for addr, c := range clients {
+                    buf := make([]byte, 0)
+                    buf = append(buf, msg.SERVER_HELLO)
+                    for k, _ := range clients {
+                        if k != addr {
+                            buf = append(buf, k[:]...)
+                        }
+                    }
                     log.Println("Sent     SERVER_HELLO to  ", msg.To_udp_addr(addr[:]), ":", buf[1:])
                     c.tx <- buf
                 }
-            case addr := <- hello_channel:
-                var m msg.Mesher_addres
-                msg.From_addr(m[:], addr)
-                c, ok := clients[m]
-                if !ok {
-                    c = client{
-                        watchdog(addr, timed_out),
-                        writer(addr, conn),
-                    }
-                    clients[m] = c
-                }
-                c.watchdog <- struct{}{}
             case a := <- timed_out:
                 var m msg.Mesher_addres
                 msg.From_addr(m[:], a)
-                delete(clients, m)
-                // todo delete client
+                c, ok := clients[m]
+                if ok {
+                    close(c.tx)
+                    delete(clients, m)
+                }
                 log.Println("Timed out ", a)
-            case b := <- relay_channel:
-                // todo delete client
-                if len(b) >= 18 {
-                    dest := msg.To_udp_addr(b[:18])
-                    log.Println("Relaying to ", dest, " ", b[18:])
+            case client_msg := <- client_msg_channel:
+                switch client_msg.Msg_type {
+                case msg.CLIENT_HELLO:
+                    log.Println("Received CLIENT_HELLO from", client_msg.Src)
+                    var m msg.Mesher_addres
+                    msg.From_addr(m[:], client_msg.Src)
+                    c, ok := clients[m]
+                    if !ok {
+                        tx := make(chan []byte)
+                        msg.Writer_to(client_msg.Src, conn, tx)
+                        c = client {
+                            watchdog(client_msg.Src, timed_out),
+                            tx,
+                        }
+                        clients[m] = c
+                    }
+                    c.watchdog <- struct{}{}
+                case msg.CLIENT_RELAY_TO:
+                    log.Println("Received CLIENT_RELAY_TO from", client_msg.Src)
+                    if len(client_msg.Buf) >= 18 {
+                        var m msg.Mesher_addres
+                        dst := msg.To_udp_addr(client_msg.Buf[:18])
+                        msg.From_addr(m[:], dst)
+                        c, ok := clients[m]
+                        if !ok {
+                            log.Println("Relaying from", client_msg.Src, "to", dst, "but client not present");
+                        } else {
+                            buf := make([]byte, 65536)
+                            buf[0] = msg.SERVER_RELAY_FROM
+                            msg.From_addr(buf[1:19], client_msg.Src)
+                            copy(buf[19:], client_msg.Buf[18:])
+                            c.tx <- buf[:len(client_msg.Buf) + 1]
+                        }
+                    }
                 }
             }
         }
     }()
-}
-
-func writer(addr net.UDPAddr, conn *net.UDPConn) chan []byte{
-    // todo goroutine is leaking if channel is not closed
-    tx := make(chan []byte)
-    go func() {
-        for b := range tx {
-            conn.WriteToUDP(b, &addr)
-        }
-        log.Println("Writer finishing for ", addr)
-    }()
-    return tx
-}
-
-func reader(conn *net.UDPConn) (chan net.UDPAddr, chan []byte) {
-    hello_channel := make(chan net.UDPAddr)
-    relay_channel := make(chan []byte)
-    go func() {
-        for {
-            buf := make([]byte, 65536)
-            n, addr, err := conn.ReadFromUDP(buf)
-            if err != nil {
-                log.Println("Reader Error: ", err)
-                // todo really unrecoverable?
-                break;
-            }
-            msg_type := buf[0]
-            switch msg_type {
-            case msg.CLIENT_HELLO:
-                log.Println("Received CLIENT_HELLO from", addr)
-                hello_channel <- *addr
-            case msg.CLIENT_RELAY_TO:
-                log.Println("Received CLIENT_RELAY_TO from", addr)
-                relay_channel <- buf[1:n]
-            }
-        }
-        log.Println("Reader Ending")
-    }()
-    return hello_channel, relay_channel
 }
 
 func main() {
@@ -122,8 +105,8 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-    hello_channel, relay_channel := reader(conn)
-    server(hello_channel, relay_channel, conn)
+    client_msg_channel := msg.Reader(conn)
+    server(client_msg_channel, conn)
 
     for { }
     conn.Close()

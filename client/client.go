@@ -7,38 +7,46 @@ import (
     "time"
 )
 
-func reader(conn *net.UDPConn) chan []net.UDPAddr {
-    peer_channel := make(chan []net.UDPAddr)
+func client(server_msg_channel chan msg.Mesher_msg, tx chan []byte) {
     go func() {
+        var peers []net.UDPAddr
+        hello_ticker := time.NewTicker(3 * time.Second)
+        peer_ticker := time.NewTicker(5 * time.Second)
         for {
-            rxbuf := make([]byte, 65536)
-            n, addr, err := conn.ReadFromUDP(rxbuf)
-            if err != nil {
-                break;
-            }
-            if rxbuf[0] == msg.SERVER_HELLO {
-                bufs := make([]net.UDPAddr, 0)
-                i:=1
-                for n-i>=18  {
-                    a := msg.To_udp_addr(rxbuf[i:i+18])
-                    i+=18
-                    bufs = append(bufs, a)
+            select {
+            case <- hello_ticker.C:
+                var txbuf [1]byte
+                txbuf[0] = msg.CLIENT_HELLO
+                tx <- txbuf[:]
+            case <- peer_ticker.C:
+                for _,p := range peers {
+                    var txbuf [20]byte
+                    txbuf[0] = msg.CLIENT_RELAY_TO
+                    msg.From_addr(txbuf[1:19], p)
+                    txbuf[19] = 'b'
+                    log.Println("To Peer:", txbuf)
+                    tx <- txbuf[:]
                 }
-                log.Println("SERVER_HELLO from ", addr, ": ", bufs)
-                peer_channel<-bufs
-            }
-        }
-        log.Println("reader ending")
-    }()
-    return peer_channel
-}
-
-func channel_reader(peer_channel chan []net.UDPAddr) {
-    go func() {
-        for {
-            new_peers := <-peer_channel
-            for _,p := range new_peers {
-                log.Println("New Peer:", p)
+            case server_msg := <- server_msg_channel:
+                switch server_msg.Msg_type {
+                case msg.SERVER_HELLO:
+                    log.Println("Received SERVER_HELLO from", server_msg.Src)
+                    bufs := make([]net.UDPAddr, 0)
+                    n := len(server_msg.Buf)
+                    i:=0
+                    for n-i>=18  {
+                        a := msg.To_udp_addr(server_msg.Buf[i:i+18])
+                        i+=18
+                        bufs = append(bufs, a)
+                    }
+                    peers = bufs
+                case msg.SERVER_RELAY_FROM:
+                    if len(server_msg.Buf) >= 18 {
+                        relayed_from := msg.To_udp_addr(server_msg.Buf[:18])
+                        log.Println("Received SERVER_RELAY_FROM from", relayed_from)
+                        log.Println("Relayed data:", string(server_msg.Buf[18:]))
+                    }
+                }
             }
         }
     }()
@@ -61,26 +69,12 @@ func main() {
         log.Fatal(err)
     }
 
-    peer_channel := reader(conn)
-    channel_reader(peer_channel)
+    tx := make(chan []byte)
+    msg.Writer(*server_addr, conn, tx)
+    peer_channel := msg.Reader(conn)
+    client(peer_channel, tx)
 
-    for {
-        var txbuf [19]byte
-        txbuf[0] = msg.CLIENT_HELLO
-        msg.From_addr(txbuf[1:], *server_addr)
-        _, err := conn.Write(txbuf[:1])
-        if err != nil {
-            log.Println(txbuf, err)
-        }
-        time.Sleep(time.Second * 1)
-        txbuf[0] = msg.CLIENT_RELAY_TO
-        txbuf[1] = 'a'
-        _, err = conn.Write(txbuf[:])
-        if err != nil {
-            log.Println(txbuf, err)
-        }
-        time.Sleep(time.Second * 1)
-    }
+    for { }
 
     conn.Close()
 
