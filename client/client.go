@@ -1,20 +1,20 @@
 package main
 
 import (
+	"bytes"
+	"encoding/gob"
 	rl "github.com/gen2brain/raylib-go/raylib"
+	"log"
 	"mesher/mesher"
 	"time"
-	"log"
-	"encoding/gob"
-	"bytes"
 )
 
 const simulationPeriod = 100 * time.Millisecond
 
 type rectangle struct {
 	fraction int
-	live int
-	pos rl.Vector2
+	live     int
+	pos      rl.Vector2
 }
 
 type state struct {
@@ -25,19 +25,19 @@ type action struct {
 	Pos rl.Vector2
 }
 
-func (s *state)simulate(actions, fromPeer []action) {
+func (s *state) simulate(actions, fromPeer []action) {
 	rs := make([]rectangle, 0)
-	for _,a := range s.rectangles {
+	for _, a := range s.rectangles {
 		a.live -= 1
 		if a.live > 0 {
 			rs = append(rs, a)
 		}
 	}
 	s.rectangles = rs
-	for _,a := range actions {
+	for _, a := range actions {
 		s.rectangles = append(s.rectangles, rectangle{0, 10, a.Pos})
 	}
-	for _,a := range fromPeer {
+	for _, a := range fromPeer {
 		s.rectangles = append(s.rectangles, rectangle{1, 10, a.Pos})
 	}
 }
@@ -49,8 +49,8 @@ func simulator(actions chan action, fromPeer, toPeer chan []action) chan state {
 		peer := make([]action, 0)
 		actionHistory := make([][]action, 0)
 		actionHistory = append(actionHistory, make([]action, 0))
-		ticker := time.NewTicker(simulationPeriod)
-		s := state {
+		simulationTick := time.Tick(simulationPeriod)
+		s := state{
 			make([]rectangle, 0),
 		}
 		for {
@@ -59,7 +59,7 @@ func simulator(actions chan action, fromPeer, toPeer chan []action) chan state {
 				peer = a
 			case a := <-actions:
 				collectedActions = append(collectedActions, a)
-			case <-ticker.C:
+			case <-simulationTick:
 				var current []action
 				current, actionHistory = actionHistory[0], append(actionHistory[1:], collectedActions)
 				toPeer <- collectedActions
@@ -74,16 +74,17 @@ func simulator(actions chan action, fromPeer, toPeer chan []action) chan state {
 	return states
 }
 
-func communicator(toPeer chan []action) chan []action{
+func communicator(toPeer chan []action) chan []action {
 	fromPeer := make(chan []action, 1)
-	go func () {
+	go func() {
 		for {
 			address := "127.0.0.1:8981"
 			broadcast, done, incoming := mesher.Bonder(address)
 
-			pollLoop: for {
+		pollLoop:
+			for {
 				select {
-				case d:=<-toPeer:
+				case d := <-toPeer:
 					var b bytes.Buffer
 					enc := gob.NewEncoder(&b)
 					err := enc.Encode(d)
@@ -91,7 +92,7 @@ func communicator(toPeer chan []action) chan []action{
 						log.Fatal("encode:", err)
 					}
 					broadcast <- b.Bytes()
-				case m:=<-incoming:
+				case m := <-incoming:
 					var b bytes.Buffer
 					b.Write(m.Buf)
 					dec := gob.NewDecoder(&b)
@@ -103,9 +104,9 @@ func communicator(toPeer chan []action) chan []action{
 					if len(a) > 0 {
 						log.Println(m.PeerId, a)
 					}
-					fromPeer<-a
+					fromPeer <- a
 				case <-done:
-					break pollLoop;
+					break pollLoop
 				}
 			}
 		}
@@ -120,18 +121,19 @@ func main() {
 	states := simulator(actions, fromPeer, toPeer)
 	rl.SetConfigFlags(rl.FlagWindowHighdpi)
 	rl.SetConfigFlags(rl.FlagWindowResizable)
-	rl.InitWindow(800, 450, "raylib [core] example - basic window")
+	rl.InitWindow(800, 450, "mesher - demonstrator for a simple netcode")
 	defer rl.CloseWindow()
 
 	reset := false
 
 	rl.SetTargetFPS(60)
-	s:=state{}
+	s := state{}
 
 	for !rl.WindowShouldClose() {
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.RayWhite)
 
+		/* Act on Press like Carmack tells us to */
 		mouseUp := rl.IsMouseButtonDown(rl.MouseButtonRight)
 		mouseDown := rl.IsMouseButtonUp(rl.MouseButtonRight)
 		if mouseDown && reset {
@@ -141,25 +143,24 @@ func main() {
 			reset = true
 		}
 
-		drainLoop:
+	drainLoop:
 		for {
 			select {
-			case s=<-states:
+			case s = <-states:
 			default:
 				break drainLoop
 			}
 		}
 
-		for _,v := range s.rectangles {
-			/* TODO strange *2 workaround needed for high dpi screen 8 */
+		for _, v := range s.rectangles {
 			c := rl.Blue
 			if v.fraction != 0 {
 				c = rl.Red
 			}
+			/* TODO strange *2 workaround needed for high dpi screen */
 			rl.DrawRectangle(int32(v.pos.X)*2, int32(v.pos.Y)*2, 50, 50, c)
 		}
 
 		rl.EndDrawing()
 	}
 }
-
