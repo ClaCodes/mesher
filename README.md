@@ -31,8 +31,14 @@ For now it was only tested locally. Run a server instance and run two client
 instances. Right-click in window of client 1 blues squares should appear.
 Red squares should appear in the window of client 2 and vice versa.
 ### Server
+The server can be run directly on the machine by using go:
 ```
 go run mesher/server
+```
+Alternatively it can be run in a container by using the provided Dockerfile:
+```
+docker build -t mesher_server:latest .
+docker run --rm -p 8981:8981 mesher_server:latest
 ```
 ### Client
 The client pulls in the entire raylib library. The first build/run will take
