@@ -367,11 +367,11 @@ func Server(serverAddress string) chan struct{} {
 	gob.Register(dataRelayedFrom{})
 	gob.Register(dataDirect{})
 
-	localAddr, err := net.ResolveUDPAddr("udp", serverAddress)
+	serverAddressUDP, err := net.ResolveUDPAddr("udp", serverAddress)
 	if err != nil {
 		log.Fatal(err)
 	}
-	conn, err := net.ListenUDP("udp", localAddr)
+	conn, err := net.ListenUDP("udp", serverAddressUDP)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -389,7 +389,7 @@ func Server(serverAddress string) chan struct{} {
 	return done
 }
 
-func Bonder(serverAddress string) (chan []byte, chan struct{}, chan PeerMsg) {
+func Bonder(localAddress, serverAddress string) (chan []byte, chan struct{}, chan PeerMsg) {
 	gob.Register(getPeerList{})
 	gob.Register(peerList{})
 	gob.Register(keepAlive{})
@@ -403,13 +403,12 @@ func Bonder(serverAddress string) (chan []byte, chan struct{}, chan PeerMsg) {
 		log.Fatal(err)
 	}
 
-	localAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	localAddressUDP, err := net.ResolveUDPAddr("udp", localAddress)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Println("localAddr", localAddr)
 
-	conn, err := net.ListenUDP("udp", localAddr)
+	conn, err := net.ListenUDP("udp", localAddressUDP)
 	if err != nil {
 		log.Fatal(err)
 	}

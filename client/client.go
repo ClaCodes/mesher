@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/gob"
+	"flag"
 	rl "github.com/gen2brain/raylib-go/raylib"
 	"log"
 	"mesher/mesher"
@@ -74,12 +75,11 @@ func simulator(actions chan action, fromPeer, toPeer chan []action) chan state {
 	return states
 }
 
-func communicator(toPeer chan []action) chan []action {
+func communicator(localAddress, serverAddress string, toPeer chan []action) chan []action {
 	fromPeer := make(chan []action, 1)
 	go func() {
 		for {
-			address := "127.0.0.1:8981"
-			broadcast, done, incoming := mesher.Bonder(address)
+			broadcast, done, incoming := mesher.Bonder(localAddress, serverAddress)
 
 		pollLoop:
 			for {
@@ -115,9 +115,18 @@ func communicator(toPeer chan []action) chan []action {
 }
 
 func main() {
+	localAddress := flag.String(
+		"localAddress",
+		"127.0.0.1:0",
+		"local address to listen for udp packages for")
+	serverAddress := flag.String(
+		"serverAddress",
+		"127.0.0.1:8981",
+		"local address to listen for udp packages for")
+	flag.Parse()
 	actions := make(chan action, 1)
 	toPeer := make(chan []action, 1)
-	fromPeer := communicator(toPeer)
+	fromPeer := communicator(*localAddress, *serverAddress, toPeer)
 	states := simulator(actions, fromPeer, toPeer)
 	rl.SetConfigFlags(rl.FlagWindowHighdpi)
 	rl.SetConfigFlags(rl.FlagWindowResizable)

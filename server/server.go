@@ -1,11 +1,16 @@
 package main
 
 import (
+	"flag"
 	"mesher/mesher"
 )
 
 func main() {
-	address := ":8981"
-	done := mesher.Server(address)
+	address := flag.String(
+		"address",
+		":8981",
+		"local address to listen for udp packages for")
+	flag.Parse()
+	done := mesher.Server(*address)
 	<-done
 }
