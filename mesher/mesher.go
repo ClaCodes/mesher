@@ -240,10 +240,16 @@ type peerList struct{ Peers []address }
 
 func (m peerList) updatePeer(b *peer, from *net.UDPAddr, replies chan response,
 	data chan PeerMsg) {
+	knownPeerIds := make(map[address]int)
 	for _, p := range m.Peers {
-		b.peerIds[p] = b.nextPeerId
-		b.nextPeerId += 1
+		id, ok := b.peerIds[p]
+		if !ok {
+			id = b.nextPeerId
+			b.nextPeerId += 1
+		}
+		knownPeerIds[p] = id
 	}
+	b.peerIds = knownPeerIds
 }
 
 type keepAlive struct{}
