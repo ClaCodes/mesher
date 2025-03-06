@@ -54,6 +54,7 @@ func watchdog(addr *net.UDPAddr, timeout chan *net.UDPAddr) chan struct{} {
 			select {
 			case <-channel:
 			case <-time.After(5 * time.Second):
+				log.Println("watchdog timeout", addr)
 				timeout <- addr
 				return
 			}
@@ -63,7 +64,7 @@ func watchdog(addr *net.UDPAddr, timeout chan *net.UDPAddr) chan struct{} {
 }
 
 func reader(conn *net.UDPConn) chan request {
-	c := make(chan request)
+	requests := make(chan request)
 	go func() {
 		for {
 			buf := make([]byte, 65536)
@@ -71,12 +72,12 @@ func reader(conn *net.UDPConn) chan request {
 			if err != nil {
 				break
 			}
-			c <- request{from, buf[:n]}
+			requests <- request{from, buf[:n]}
 		}
-		log.Println("reader shutting down")
-		close(c)
+		log.Println("reader shutting down, closing 'requests'-channel")
+		close(requests)
 	}()
-	return c
+	return requests
 }
 
 func writer(conn *net.UDPConn, out chan response) chan struct{} {
@@ -94,7 +95,9 @@ func writer(conn *net.UDPConn, out chan response) chan struct{} {
 			}
 			conn.WriteToUDP(b.Bytes(), m.to)
 		}
+		log.Println("writer shutting down, sending 'done'-signal, closing 'done'-channel")
 		done <- struct{}{}
+		close(done)
 	}()
 	return done
 }
@@ -103,29 +106,29 @@ func watcher(seen chan *net.UDPAddr) chan *net.UDPAddr {
 	timeout := make(chan *net.UDPAddr)
 	go func() {
 		peers := make(map[address]chan struct{})
-		timeout := make(chan *net.UDPAddr)
-		for seen != nil || timeout != nil {
+		timeoutInner := make(chan *net.UDPAddr)
+		for seen != nil || len(peers) > 0 {
 			select {
 			case m, ok := <-seen:
 				if !ok {
 					seen = nil
+					log.Println("'seen'-channel closed. Await all timeouts")
 					continue
 				}
 				feed, ok := peers[addrKey(m)]
 				if !ok {
-					feed = watchdog(m, timeout)
+					feed = watchdog(m, timeoutInner)
 					peers[addrKey(m)] = feed
 				}
 				feed <- struct{}{}
-			case a, ok := <-timeout:
-				if !ok {
-					timeout = nil
-					continue
-				}
+			case a := <-timeoutInner:
+				log.Println("watcher timeout", a)
 				delete(peers, addrKey(a))
 				timeout <- a
 			}
 		}
+		log.Println("watcher shutting down, closing 'timeout'-channel")
+		close(timeoutInner)
 		close(timeout)
 	}()
 	return timeout
@@ -147,6 +150,7 @@ type getPeerList struct{}
 
 func (m getPeerList) updateServer(s *server, from *net.UDPAddr,
 	replies chan response) {
+	log.Println("getPeerList from", from)
 	a := addrKey(from)
 	s.peers[a] = struct{}{}
 	reply := peerList{make([]address, 0)}
@@ -165,7 +169,8 @@ type dataRelayTo struct {
 
 func (m dataRelayTo) updateServer(s *server, from *net.UDPAddr,
 	replies chan response) {
-	log.Println("relaying from", from, "to", m.To)
+	toUDP := addrFromKey(m.To)
+	log.Println("dataRelayTo from", from, "to", toUDP)
 	_, ok := s.peers[m.To]
 	if ok {
 		reply := dataRelayedFrom{
@@ -187,12 +192,15 @@ func meshServer(requests chan request) chan response {
 			case a, ok := <-timeout:
 				if !ok {
 					timeout = nil
+					log.Println("'timeout'-channel closed")
 					continue
 				}
 				delete(s.peers, addrKey(a))
 			case request, ok := <-requests:
 				if !ok {
 					requests = nil
+					log.Println("'requests'-channel closed. Closing 'seen'-channel")
+					close(seen)
 					continue
 				}
 				buf := bytes.NewBuffer(request.buffer)
@@ -207,6 +215,7 @@ func meshServer(requests chan request) chan response {
 				m.updateServer(&s, request.from, responses)
 			}
 		}
+		log.Println("meshServer shutting down, closing 'responses'-channel")
 		close(responses)
 	}()
 	return responses
@@ -383,8 +392,10 @@ func Server(serverAddress string) chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		<-innerDone
+		log.Println("All goroutines done, closing connection, sending 'done'-signal, closing 'done'-channel")
 		conn.Close()
 		done <- struct{}{}
+		close(done)
 	}()
 	return done
 }
