@@ -7,6 +7,8 @@ COPY ./go.mod ./go.sum ./
 RUN go mod download
 
 COPY . .
-RUN go build -v -o /usr/local/bin/mesher_server ./server/server.go
+RUN go build -ldflags "-linkmode 'external' -extldflags '-static'" -v -o /usr/local/bin/mesher_server ./server/server.go
 
+FROM scratch
+COPY --from=0 /usr/local/bin/mesher_server /bin/mesher_server
 CMD ["mesher_server"]
