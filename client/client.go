@@ -79,7 +79,7 @@ func communicator(localAddress, serverAddress string, toPeer chan []action) chan
 	fromPeer := make(chan []action, 1)
 	go func() {
 		for {
-			broadcast, done, incoming := mesher.Bonder(localAddress, serverAddress)
+			broadcast, done, incoming := mesher.Peer(localAddress, serverAddress)
 
 		pollLoop:
 			for {
