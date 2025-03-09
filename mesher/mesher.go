@@ -2,7 +2,6 @@ package mesher
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/gob"
 	"log"
 	"net"
@@ -15,39 +14,16 @@ import (
 /******************************************************************************/
 
 type request struct {
-	from   *net.UDPAddr
+	from   netip.AddrPort
 	buffer []byte
 }
 
 type response struct {
-	to *net.UDPAddr
+	to netip.AddrPort
 	m  interface{}
 }
 
-// TODO net.UDPAddr as map-key. Alternative?
-type address [18]byte
-
-func addrKey(addr *net.UDPAddr) address {
-	var a address
-	ip := addr.AddrPort().Addr().As16()
-	port := addr.AddrPort().Port()
-	copy(a[:16], ip[:])
-	binary.BigEndian.PutUint16(a[16:], port)
-	return a
-}
-
-func addrFromKey(a address) *net.UDPAddr {
-	var ip netip.Addr
-	ip, ok := netip.AddrFromSlice(a[:16])
-	if !ok {
-		return nil
-	}
-	port := binary.BigEndian.Uint16(a[16:])
-	addr := netip.AddrPortFrom(ip, port)
-	return net.UDPAddrFromAddrPort(addr)
-}
-
-func watchdog(addr *net.UDPAddr, timeout chan *net.UDPAddr) chan struct{} {
+func watchdog(addr netip.AddrPort, timeout chan netip.AddrPort) chan struct{} {
 	channel := make(chan struct{})
 	go func() {
 		for {
@@ -72,7 +48,12 @@ func reader(conn *net.UDPConn) chan request {
 			if err != nil {
 				break
 			}
-			requests <- request{from, buf[:n]}
+			sourceIP, ok := netip.AddrFromSlice(from.IP.To16())
+			if !ok {
+				continue
+			}
+			source := netip.AddrPortFrom(sourceIP, uint16(from.Port))
+			requests <- request{source, buf[:n]}
 		}
 		log.Println("reader shutting down, closing 'requests'-channel")
 		close(requests)
@@ -84,16 +65,14 @@ func writer(conn *net.UDPConn, out chan response) chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		for m := range out {
-			if m.to == nil {
-				continue
-			}
 			var b bytes.Buffer
 			enc := gob.NewEncoder(&b)
 			err := enc.Encode(&m.m)
 			if err != nil {
 				log.Fatal("encode:", err)
 			}
-			conn.WriteToUDP(b.Bytes(), m.to)
+			destination := net.UDPAddrFromAddrPort(m.to)
+			conn.WriteToUDP(b.Bytes(), destination)
 		}
 		log.Println("writer shutting down, sending 'done'-signal, closing 'done'-channel")
 		done <- struct{}{}
@@ -102,11 +81,11 @@ func writer(conn *net.UDPConn, out chan response) chan struct{} {
 	return done
 }
 
-func watcher(seen chan *net.UDPAddr) chan *net.UDPAddr {
-	timeout := make(chan *net.UDPAddr)
+func watcher(seen chan netip.AddrPort) chan netip.AddrPort {
+	timeout := make(chan netip.AddrPort)
 	go func() {
-		peers := make(map[address]chan struct{})
-		timeoutInner := make(chan *net.UDPAddr)
+		peers := make(map[netip.AddrPort]chan struct{})
+		timeoutInner := make(chan netip.AddrPort)
 		for seen != nil || len(peers) > 0 {
 			select {
 			case m, ok := <-seen:
@@ -115,15 +94,15 @@ func watcher(seen chan *net.UDPAddr) chan *net.UDPAddr {
 					log.Println("'seen'-channel closed. Await all timeouts")
 					continue
 				}
-				feed, ok := peers[addrKey(m)]
+				feed, ok := peers[m]
 				if !ok {
 					feed = watchdog(m, timeoutInner)
-					peers[addrKey(m)] = feed
+					peers[m] = feed
 				}
 				feed <- struct{}{}
 			case a := <-timeoutInner:
 				log.Println("watcher timeout", a)
-				delete(peers, addrKey(a))
+				delete(peers, a)
 				timeout <- a
 			}
 		}
@@ -139,21 +118,21 @@ func watcher(seen chan *net.UDPAddr) chan *net.UDPAddr {
 /******************************************************************************/
 
 type server struct {
-	peers map[address]struct{}
+	peers map[netip.AddrPort]struct{}
 }
 
 type serverRequest interface {
-	updateServer(s *server, from *net.UDPAddr, replies chan response)
+	updateServer(s *server, from netip.AddrPort, replies chan response)
 }
 
 type getPeerList struct{}
 
-func (m getPeerList) updateServer(s *server, from *net.UDPAddr,
+func (m getPeerList) updateServer(s *server, from netip.AddrPort,
 	replies chan response) {
 	log.Println("getPeerList from", from)
-	a := addrKey(from)
+	a := from
 	s.peers[a] = struct{}{}
-	reply := peerList{make([]address, 0)}
+	reply := peerList{make([]netip.AddrPort, 0)}
 	for k, _ := range s.peers {
 		if k != a {
 			reply.Addresses = append(reply.Addresses, k)
@@ -163,30 +142,29 @@ func (m getPeerList) updateServer(s *server, from *net.UDPAddr,
 }
 
 type dataRelayTo struct {
-	To   address
+	To   netip.AddrPort
 	Data []byte
 }
 
-func (m dataRelayTo) updateServer(s *server, from *net.UDPAddr,
+func (m dataRelayTo) updateServer(s *server, from netip.AddrPort,
 	replies chan response) {
-	toUDP := addrFromKey(m.To)
-	log.Println("dataRelayTo from", from, "to", toUDP)
+	log.Println("dataRelayTo from", from, "to", m.To)
 	_, ok := s.peers[m.To]
 	if ok {
 		reply := dataRelayedFrom{
-			From: addrKey(from),
+			From: from,
 			Data: m.Data,
 		}
-		replies <- response{addrFromKey(m.To), reply}
+		replies <- response{m.To, reply}
 	}
 }
 
 func meshServer(requests chan request) chan response {
 	responses := make(chan response)
 	go func() {
-		seen := make(chan *net.UDPAddr)
+		seen := make(chan netip.AddrPort)
 		timeout := watcher(seen)
-		s := server{make(map[address]struct{})}
+		s := server{make(map[netip.AddrPort]struct{})}
 		for timeout != nil || requests != nil {
 			select {
 			case a, ok := <-timeout:
@@ -195,7 +173,7 @@ func meshServer(requests chan request) chan response {
 					log.Println("'timeout'-channel closed")
 					continue
 				}
-				delete(s.peers, addrKey(a))
+				delete(s.peers, a)
 			case request, ok := <-requests:
 				if !ok {
 					requests = nil
@@ -226,22 +204,22 @@ func meshServer(requests chan request) chan response {
 /******************************************************************************/
 
 type peer struct {
-	peerIds       map[address]int
+	peerIds       map[netip.AddrPort]int
 	nextPeerId    int
-	alivePeers    map[address]struct{}
-	seenPeerAlive chan *net.UDPAddr
+	alivePeers    map[netip.AddrPort]struct{}
+	seenPeerAlive chan netip.AddrPort
 }
 
 type peerRequest interface {
-	updatePeer(s *peer, from *net.UDPAddr, replies chan response,
+	updatePeer(s *peer, from netip.AddrPort, replies chan response,
 		data chan PeerMsg)
 }
 
-type peerList struct{ Addresses []address }
+type peerList struct{ Addresses []netip.AddrPort }
 
-func (m peerList) updatePeer(p *peer, from *net.UDPAddr, replies chan response,
+func (m peerList) updatePeer(p *peer, from netip.AddrPort, replies chan response,
 	data chan PeerMsg) {
-	knownPeerIds := make(map[address]int)
+	knownPeerIds := make(map[netip.AddrPort]int)
 	for _, a := range m.Addresses {
 		id, ok := p.peerIds[a]
 		if !ok {
@@ -255,25 +233,26 @@ func (m peerList) updatePeer(p *peer, from *net.UDPAddr, replies chan response,
 
 type keepAlive struct{}
 
-func (m keepAlive) updatePeer(p *peer, from *net.UDPAddr, replies chan response,
+func (m keepAlive) updatePeer(p *peer, from netip.AddrPort, replies chan response,
 	data chan PeerMsg) {
 	replies <- response{from, isAlive{}}
 }
 
 type isAlive struct{}
 
-func (m isAlive) updatePeer(p *peer, from *net.UDPAddr, replies chan response,
+func (m isAlive) updatePeer(p *peer, from netip.AddrPort, replies chan response,
 	data chan PeerMsg) {
-	p.alivePeers[addrKey(from)] = struct{}{}
+        log.Println("isAlive", from)
+	p.alivePeers[from] = struct{}{}
 	p.seenPeerAlive <- from
 }
 
 type dataRelayedFrom struct {
-	From address
+	From netip.AddrPort
 	Data []byte
 }
 
-func (m dataRelayedFrom) updatePeer(p *peer, from *net.UDPAddr,
+func (m dataRelayedFrom) updatePeer(p *peer, from netip.AddrPort,
 	replies chan response, data chan PeerMsg) {
 	id, ok := p.peerIds[m.From]
 	if !ok {
@@ -287,11 +266,10 @@ type dataDirect struct {
 	Data []byte
 }
 
-func (m dataDirect) updatePeer(p *peer, from *net.UDPAddr,
+func (m dataDirect) updatePeer(p *peer, from netip.AddrPort,
 	replies chan response, data chan PeerMsg) {
 	log.Println("dataDirect from", from)
-	a := addrKey(from)
-	id, ok := p.peerIds[a]
+	id, ok := p.peerIds[from]
 	if !ok {
 		log.Println("dataDirect from unknown Peer, ignoring it", from)
 	} else {
@@ -299,16 +277,16 @@ func (m dataDirect) updatePeer(p *peer, from *net.UDPAddr,
 	}
 }
 
-func meshPeer(serverAddressUdp *net.UDPAddr, requests chan request,
+func meshPeer(serverAddressUdp netip.AddrPort, requests chan request,
 	broadcast chan []byte) (chan PeerMsg, chan response) {
 	data := make(chan PeerMsg)
 	responses := make(chan response)
 	go func() {
 		p := peer{
-			make(map[address]int),
+			make(map[netip.AddrPort]int),
 			0,
-			make(map[address]struct{}),
-			make(chan *net.UDPAddr),
+			make(map[netip.AddrPort]struct{}),
+			make(chan netip.AddrPort),
 		}
 		timeout := watcher(p.seenPeerAlive)
 		ticker := time.Tick(3 * time.Second)
@@ -318,8 +296,8 @@ func meshPeer(serverAddressUdp *net.UDPAddr, requests chan request,
 				// TODO: timout on the peer list?
 				responses <- response{serverAddressUdp, getPeerList{}}
 				for addr, _ := range p.peerIds {
-					log.Println("Sending keep alive")
-					responses <- response{addrFromKey(addr), keepAlive{}}
+					log.Println("Sending keepAlive", addr)
+					responses <- response{addr, keepAlive{}}
 				}
 			case a, ok := <-timeout:
 				if !ok {
@@ -328,7 +306,7 @@ func meshPeer(serverAddressUdp *net.UDPAddr, requests chan request,
 					continue
 				}
 				log.Println("Peer timed out", a)
-				delete(p.alivePeers, addrKey(a))
+				delete(p.alivePeers, a)
 			case buf, ok := <-broadcast:
 				if !ok {
 					log.Println("broadcast channel was closed, only reading from now on")
@@ -341,7 +319,7 @@ func meshPeer(serverAddressUdp *net.UDPAddr, requests chan request,
 					_, isAlive := p.alivePeers[addr]
 					if isAlive {
 						m := response{
-							addrFromKey(addr),
+							addr,
 							dataDirect{cp},
 						}
 						responses <- m
@@ -448,7 +426,7 @@ func Peer(localAddress, serverAddress string) (chan []byte, chan struct{}, chan 
 	broadcast := make(chan []byte)
 
 	request := reader(conn)
-	incoming, out := meshPeer(serverAddressUdp, request, broadcast)
+	incoming, out := meshPeer(serverAddressUdp.AddrPort(), request, broadcast)
 	innerDone := writer(conn, out)
 
 	go func() {
