@@ -35,14 +35,14 @@ The server can be run directly on the machine by using go:
 ```
 go run mesher/server
 ```
-Alternatively it can be run in a container by using the provided Dockerfile:
+Alternatively it can be run in a container by using the provided `Containerfile`:
 ```
-docker build -t mesher_server:latest .
-docker run --rm -p 8981:8981 mesher_server:latest
+podman build -t mesher_server:latest .
+podman run -d --rm -p 8981:8981/udp mesher_server:latest
 ```
 ### Client
 The client pulls in the entire raylib library. The first build/run will take
 much longer.
 ```
-go run mehser/client
+go run mesher/client
 ```
