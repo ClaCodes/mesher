@@ -1,0 +1,11 @@
+name: on_push
+on: [push]
+jobs:
+  build_container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build_container
+        with:
+          IMAGE_NAME: mesher_server
+          TAG: ${{ github.sha }}
